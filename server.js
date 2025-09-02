@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const WebSocket = require('ws');
+const protobuf = require('protobufjs');
 require('dotenv').config();
 
 const app = express();
@@ -20,10 +22,218 @@ const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
 let tokenCache = {
   accessToken: ACCESS_TOKEN,
   refreshToken: REFRESH_TOKEN,
-  expiresAt: Date.now() + (3600 * 1000) // 1 ora default
+  expiresAt: Date.now() + (3600 * 1000)
 };
 
-// Funzione per refresh token
+// Variabili per connessione TCP
+let wsConnection = null;
+let isConnected = false;
+let authAccounts = new Map(); // accountId -> isAuthenticated
+let protobufRoot = null;
+
+// Carica definizioni Protobuf
+async function loadProtobuf() {
+  try {
+    // Per ora usa definizioni inline semplici
+    protobufRoot = {
+      // Simulazione delle definizioni protobuf necessarie
+      ApplicationAuthReq: { create: (data) => data },
+      GetAccountListReq: { create: (data) => data },
+      AccountAuthReq: { create: (data) => data },
+      GetPositionsReq: { create: (data) => data },
+      decode: (buffer) => JSON.parse(buffer.toString())
+    };
+    console.log('Protobuf definitions loaded');
+  } catch (error) {
+    console.error('Error loading protobuf:', error);
+  }
+}
+
+// Connessione WebSocket a cTrader
+async function connectToCTrader() {
+  try {
+    console.log('Connecting to cTrader Open API...');
+    
+    // Endpoint WebSocket cTrader (demo)
+    const wsUrl = 'wss://openapi.ctrader.com:5036';
+    wsConnection = new WebSocket(wsUrl);
+    
+    wsConnection.on('open', () => {
+      console.log('Connected to cTrader Open API via WebSocket');
+      isConnected = true;
+      authenticateApplication();
+    });
+    
+    wsConnection.on('message', (data) => {
+      handleCTraderMessage(data);
+    });
+    
+    wsConnection.on('error', (error) => {
+      console.error('WebSocket error:', error);
+      isConnected = false;
+    });
+    
+    wsConnection.on('close', () => {
+      console.log('WebSocket connection closed');
+      isConnected = false;
+      // Riconnetti dopo 5 secondi
+      setTimeout(() => {
+        if (!isConnected) {
+          connectToCTrader();
+        }
+      }, 5000);
+    });
+    
+  } catch (error) {
+    console.error('Error connecting to cTrader:', error);
+  }
+}
+
+// Autenticazione applicazione
+function authenticateApplication() {
+  if (!wsConnection || !isConnected) return;
+  
+  try {
+    const authMessage = {
+      payloadType: 2100, // ProtoOAApplicationAuthReq
+      payload: {
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET
+      }
+    };
+    
+    wsConnection.send(JSON.stringify(authMessage));
+    console.log('Application authentication request sent');
+  } catch (error) {
+    console.error('Error authenticating application:', error);
+  }
+}
+
+// Autentica account specifico
+async function authenticateAccount(accountId) {
+  if (!wsConnection || !isConnected) {
+    throw new Error('Not connected to cTrader');
+  }
+  
+  try {
+    const token = await getValidToken();
+    
+    // Prima ottieni la lista account
+    const accountListMessage = {
+      payloadType: 2149, // ProtoOAGetAccountListByAccessTokenReq
+      payload: {
+        accessToken: token
+      }
+    };
+    
+    wsConnection.send(JSON.stringify(accountListMessage));
+    
+    // Poi autentica l'account specifico
+    setTimeout(() => {
+      const accountAuthMessage = {
+        payloadType: 2102, // ProtoOAAccountAuthReq
+        payload: {
+          ctidTraderAccountId: parseInt(accountId),
+          accessToken: token
+        }
+      };
+      
+      wsConnection.send(JSON.stringify(accountAuthMessage));
+      console.log(`Account ${accountId} authentication request sent`);
+    }, 1000);
+    
+  } catch (error) {
+    console.error('Error authenticating account:', error);
+    throw error;
+  }
+}
+
+// Gestisce messaggi da cTrader
+function handleCTraderMessage(data) {
+  try {
+    const message = JSON.parse(data.toString());
+    
+    switch (message.payloadType) {
+      case 2101: // ProtoOAApplicationAuthRes
+        console.log('Application authenticated successfully');
+        break;
+        
+      case 2103: // ProtoOAAccountAuthRes
+        const accountId = message.payload?.ctidTraderAccountId;
+        if (accountId) {
+          authAccounts.set(accountId.toString(), true);
+          console.log(`Account ${accountId} authenticated successfully`);
+        }
+        break;
+        
+      case 2150: // ProtoOAGetAccountListByAccessTokenRes
+        console.log('Received account list:', message.payload);
+        break;
+        
+      default:
+        console.log('Received message type:', message.payloadType);
+    }
+  } catch (error) {
+    console.error('Error handling cTrader message:', error);
+  }
+}
+
+// Richiedi posizioni per account
+async function requestPositions(accountId, labelFilter = null) {
+  if (!wsConnection || !isConnected) {
+    throw new Error('Not connected to cTrader');
+  }
+  
+  if (!authAccounts.get(accountId)) {
+    await authenticateAccount(accountId);
+    // Aspetta autenticazione
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('Timeout waiting for positions response'));
+    }, 10000);
+    
+    const positionsMessage = {
+      payloadType: 2118, // ProtoOAGetPositionsReq
+      payload: {
+        ctidTraderAccountId: parseInt(accountId)
+      }
+    };
+    
+    // Listener temporaneo per la risposta
+    const messageHandler = (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.payloadType === 2119) { // ProtoOAGetPositionsRes
+          clearTimeout(timeout);
+          wsConnection.removeListener('message', messageHandler);
+          
+          let positions = message.payload?.position || [];
+          
+          // Filtra per label se specificato
+          if (labelFilter) {
+            positions = positions.filter(pos => 
+              pos.label && pos.label.includes(labelFilter)
+            );
+          }
+          
+          resolve(positions);
+        }
+      } catch (error) {
+        clearTimeout(timeout);
+        wsConnection.removeListener('message', messageHandler);
+        reject(error);
+      }
+    };
+    
+    wsConnection.on('message', messageHandler);
+    wsConnection.send(JSON.stringify(positionsMessage));
+  });
+}
+
+// Funzioni token OAuth (esistenti)
 async function refreshAccessToken() {
   try {
     const url = `https://openapi.ctrader.com/apps/token?grant_type=refresh_token&refresh_token=${tokenCache.refreshToken}&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}`;
@@ -54,9 +264,7 @@ async function refreshAccessToken() {
   }
 }
 
-// Funzione per ottenere token valido
 async function getValidToken() {
-  // Se token scade tra meno di 5 minuti, rinnova
   if (Date.now() + (5 * 60 * 1000) >= tokenCache.expiresAt) {
     console.log('Token expiring soon, refreshing...');
     const newToken = await refreshAccessToken();
@@ -67,7 +275,46 @@ async function getValidToken() {
   return tokenCache.accessToken;
 }
 
-// Funzione per chiamare API Spotware
+// Endpoint REST esistenti
+app.get('/', (req, res) => {
+  res.json({
+    message: 'cTrader Bridge Server is running',
+    version: '2.0.0',
+    tcpConnection: isConnected ? 'Connected' : 'Disconnected',
+    endpoints: [
+      'GET /accounts - Get trading accounts list',
+      'GET /accounts/:accountId/balance - Get account balance', 
+      'GET /accounts/:accountId/positions - Get open positions (TCP)',
+      'GET /accounts/:accountId/trades - Get trade history (TCP)',
+      'GET /profile - Get user profile',
+      'GET /status - Server status'
+    ]
+  });
+});
+
+app.get('/status', async (req, res) => {
+  try {
+    const token = await getValidToken();
+    res.json({
+      status: 'online',
+      tokenValid: !!token,
+      tokenExpiresAt: new Date(tokenCache.expiresAt).toISOString(),
+      tcpConnection: isConnected,
+      authenticatedAccounts: Array.from(authAccounts.keys()),
+      server: 'Render',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      error: error.message,
+      tcpConnection: isConnected,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Funzioni API REST esistenti (callSpotwareAPI, ecc.)
 async function callSpotwareAPI(endpoint) {
   try {
     const token = await getValidToken();
@@ -91,43 +338,7 @@ async function callSpotwareAPI(endpoint) {
   }
 }
 
-// ROOT endpoint
-app.get('/', (req, res) => {
-  res.json({
-    message: 'cTrader Bridge Server is running',
-    version: '1.0.0',
-    endpoints: [
-      'GET /accounts - Get trading accounts list',
-      'GET /accounts/:accountId/balance - Get account balance', 
-      'GET /accounts/:accountId/positions - Get open positions',
-      'GET /accounts/:accountId/trades - Get trade history',
-      'GET /profile - Get user profile',
-      'GET /status - Server status'
-    ]
-  });
-});
-
-// Status endpoint
-app.get('/status', async (req, res) => {
-  try {
-    const token = await getValidToken();
-    res.json({
-      status: 'online',
-      tokenValid: !!token,
-      tokenExpiresAt: new Date(tokenCache.expiresAt).toISOString(),
-      server: 'Railway',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// Get user profile
+// Endpoint REST esistenti
 app.get('/profile', async (req, res) => {
   try {
     const data = await callSpotwareAPI('/connect/profile');
@@ -137,7 +348,6 @@ app.get('/profile', async (req, res) => {
   }
 });
 
-// Get trading accounts
 app.get('/accounts', async (req, res) => {
   try {
     const data = await callSpotwareAPI('/connect/tradingaccounts');
@@ -147,7 +357,6 @@ app.get('/accounts', async (req, res) => {
   }
 });
 
-// Get account balance (usando i dati già disponibili dall'endpoint accounts)
 app.get('/accounts/:accountId/balance', async (req, res) => {
   try {
     const { accountId } = req.params;
@@ -174,41 +383,55 @@ app.get('/accounts/:accountId/balance', async (req, res) => {
   }
 });
 
-// Placeholder endpoints per posizioni e trade (da implementare con WebSocket)
+// NUOVI endpoint TCP per posizioni e trade
 app.get('/accounts/:accountId/positions', async (req, res) => {
   try {
     const { accountId } = req.params;
-    const { label } = req.query; // Parametro opzionale per filtrare per label
+    const { label } = req.query;
     
-    res.status(501).json({
-      error: 'Open positions endpoint not implemented yet',
-      message: 'This requires WebSocket/TCP connection to cTrader Open API', 
-      plannedFeature: label ? `Will filter positions with label: ${label}` : 'Will return all positions',
-      alternative: 'Use /accounts endpoint to get balance information'
+    if (!isConnected) {
+      return res.status(503).json({
+        error: 'TCP connection not available',
+        message: 'Bridge server is not connected to cTrader Open API'
+      });
+    }
+    
+    const positions = await requestPositions(accountId, label);
+    
+    res.json({
+      accountId: accountId,
+      labelFilter: label || null,
+      positions: positions,
+      count: positions.length,
+      timestamp: new Date().toISOString()
     });
+    
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      tcpConnected: isConnected 
+    });
   }
 });
 
-// Endpoint per testare il filtro label
 app.get('/accounts/:accountId/positions/filtered', async (req, res) => {
   const { accountId } = req.params;
   const { label } = req.query;
   
   res.json({
-    message: 'Label filtering ready',
+    message: 'Label filtering ready - now uses real TCP connection',
     accountId: accountId,
     labelFilter: label || 'none',
-    example: `Call with ?label=AIGridBot_EURUSD to get only cBot positions`
+    tcpStatus: isConnected ? 'Connected' : 'Disconnected',
+    example: `Call /accounts/${accountId}/positions?label=AIGridBot_EURUSD to get only cBot positions`
   });
 });
 
 app.get('/accounts/:accountId/trades', async (req, res) => {
   res.status(501).json({
     error: 'Trade history endpoint not implemented yet',
-    message: 'This requires WebSocket/TCP connection to cTrader Open API',
-    alternative: 'Use /accounts endpoint to get account information'
+    message: 'Coming soon with TCP connection',
+    tcpStatus: isConnected ? 'Connected' : 'Disconnected'
   });
 });
 
@@ -221,7 +444,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     error: 'Endpoint not found',
@@ -229,14 +451,27 @@ app.use((req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`cTrader Bridge Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+// Inizializzazione server
+async function startServer() {
+  await loadProtobuf();
   
-  if (!CLIENT_ID || !CLIENT_SECRET || !ACCESS_TOKEN) {
-    console.warn('WARNING: Missing required environment variables!');
-    console.warn('Please set: CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN');
-  } else {
-    console.log('Configuration loaded successfully');
-  }
-});
+  // Avvia connessione TCP dopo 3 secondi per dare tempo al server REST
+  setTimeout(() => {
+    connectToCTrader();
+  }, 3000);
+  
+  app.listen(PORT, () => {
+    console.log(`cTrader Bridge Server v2.0 running on port ${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    
+    if (!CLIENT_ID || !CLIENT_SECRET || !ACCESS_TOKEN) {
+      console.warn('WARNING: Missing required environment variables!');
+      console.warn('Please set: CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN');
+    } else {
+      console.log('Configuration loaded successfully');
+      console.log('TCP connection will start in 3 seconds...');
+    }
+  });
+}
+
+startServer();
