@@ -176,10 +176,31 @@ app.get('/accounts/:accountId/balance', async (req, res) => {
 
 // Placeholder endpoints per posizioni e trade (da implementare con WebSocket)
 app.get('/accounts/:accountId/positions', async (req, res) => {
-  res.status(501).json({
-    error: 'Open positions endpoint not implemented yet',
-    message: 'This requires WebSocket/TCP connection to cTrader Open API',
-    alternative: 'Use /accounts endpoint to get balance information'
+  try {
+    const { accountId } = req.params;
+    const { label } = req.query; // Parametro opzionale per filtrare per label
+    
+    res.status(501).json({
+      error: 'Open positions endpoint not implemented yet',
+      message: 'This requires WebSocket/TCP connection to cTrader Open API', 
+      plannedFeature: label ? `Will filter positions with label: ${label}` : 'Will return all positions',
+      alternative: 'Use /accounts endpoint to get balance information'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint per testare il filtro label
+app.get('/accounts/:accountId/positions/filtered', async (req, res) => {
+  const { accountId } = req.params;
+  const { label } = req.query;
+  
+  res.json({
+    message: 'Label filtering ready',
+    accountId: accountId,
+    labelFilter: label || 'none',
+    example: `Call with ?label=AIGridBot_EURUSD to get only cBot positions`
   });
 });
 
