@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package ctrader;
+
+// Messaggi principali per l'autenticazione
+message ProtoOAApplicationAuthReq {
+  string clientId = 1;
+  string clientSecret = 2;
+}
+
+message ProtoOAApplicationAuthRes {
+  string errorCode = 1;
+}
+
+message ProtoOAGetAccountListByAccessTokenReq {
+  string accessToken = 1;
+}
+
+message ProtoOAGetAccountListByAccessTokenRes {
+  repeated ProtoOACtidTraderAccount ctidTraderAccount = 1;
+}
+
+message ProtoOAAccountAuthReq {
+  int64 ctidTraderAccountId = 1;
+  string accessToken = 2;
+}
+
+message ProtoOAAccountAuthRes {
+  int64 ctidTraderAccountId = 1;
+}
+
+// Richiesta posizioni aperte
+message ProtoOAGetPositionsReq {
+  int64 ctidTraderAccountId = 1;
+}
+
+message ProtoOAGetPositionsRes {
+  repeated ProtoOAPosition position = 1;
+}
+
+// Richiesta trades chiusi
+message ProtoOAGetClosedTradesReq {
+  int64 ctidTraderAccountId = 1;
+  int64 fromTimestamp = 2;
+  int64 toTimestamp = 3;
+}
+
+message ProtoOAGetClosedTradesRes {
+  repeated ProtoOAClosedTrade closedTrade = 1;
+}
+
+// Strutture dati
+message ProtoOACtidTraderAccount {
+  int64 ctidTraderAccountId = 1;
+  bool isLive = 2;
+  string brokerName = 3;
+  string depositCurrency = 4;
+  bool deleted = 5;
+}
+
+message ProtoOAPosition {
+  int64 positionId = 1;
+  ProtoOATradeSide tradeSide = 2;
+  string symbolName = 3;
+  int64 volume = 4;
+  double entryPrice = 5;
+  int64 openTimestamp = 6;
+  double currentPrice = 7;
+  double netProfit = 8;
+  string label = 9;
+}
+
+message ProtoOAClosedTrade {
+  int64 positionId = 1;
+  ProtoOATradeSide tradeSide = 2;
+  string symbolName = 3;
+  int64 volume = 4;
+  double entryPrice = 5;
+  int64 openTimestamp = 6;
+  double closePrice = 7;
+  int64 closeTimestamp = 8;
+  double netProfit = 9;
+  string label = 10;
+}
+
+// Enums
+enum ProtoOATradeSide {
+  BUY = 0;
+  SELL = 1;
+}
