@@ -31,6 +31,13 @@ let isConnected = false;
 let authAccounts = new Map();
 let protobufRoot = null;
 
+// ✅ NUOVO: Storage per dati cBot
+let cbotData = {
+  positions: [],
+  trades: [],
+  stressEvents: []
+};
+
 // Carica definizioni Protobuf
 async function loadProtobuf() {
   try {
@@ -130,6 +137,10 @@ app.get('/', (req, res) => {
       'GET /accounts/:accountId/trades - Get trade history (hybrid)',
       'POST /cbot/positions - Receive positions from cBot',
       'POST /cbot/trades - Receive trades from cBot',
+      'POST /cbot/stress - Receive stress events from cBot',
+      'GET /cbot/positions - Get stored cBot positions',
+      'GET /cbot/trades - Get stored cBot trades',
+      'GET /cbot/stress - Get stored cBot stress events',
       'GET /cbot/status - Hybrid system status',
       'GET /profile - Get user profile',
       'GET /status - Server status'
@@ -137,7 +148,197 @@ app.get('/', (req, res) => {
   });
 });
 
-// Status endpoint
+// ✅ NUOVI ENDPOINT cBot - POST (per ricevere dati dal cBot)
+app.post('/cbot/positions', (req, res) => {
+  try {
+    const positionData = req.body;
+    console.log('Received position data from cBot:', positionData.symbol, positionData.tradeType, positionData.netProfit);
+    
+    // Trova e aggiorna posizione esistente o aggiungi nuova
+    const existingIndex = cbotData.positions.findIndex(p => 
+      p.positionId === positionData.positionId && p.symbol === positionData.symbol
+    );
+    
+    if (existingIndex !== -1) {
+      cbotData.positions[existingIndex] = { ...positionData, lastUpdate: new Date().toISOString() };
+    } else {
+      cbotData.positions.push({ ...positionData, lastUpdate: new Date().toISOString() });
+    }
+    
+    // Mantieni solo le ultime 1000 posizioni
+    if (cbotData.positions.length > 1000) {
+      cbotData.positions = cbotData.positions.slice(-1000);
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Position data received and stored',
+      totalPositions: cbotData.positions.length
+    });
+  } catch (error) {
+    console.error('Error processing position data:', error);
+    res.status(500).json({ error: 'Failed to process position data' });
+  }
+});
+
+app.post('/cbot/trades', (req, res) => {
+  try {
+    const tradeData = req.body;
+    console.log('Received trade data from cBot:', tradeData.symbol, tradeData.tradeType, tradeData.netProfit);
+    
+    // Aggiungi trade (non aggiornare, sempre nuovi)
+    cbotData.trades.push({ ...tradeData, lastUpdate: new Date().toISOString() });
+    
+    // Mantieni solo gli ultimi 5000 trade
+    if (cbotData.trades.length > 5000) {
+      cbotData.trades = cbotData.trades.slice(-5000);
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Trade data received and stored',
+      totalTrades: cbotData.trades.length
+    });
+  } catch (error) {
+    console.error('Error processing trade data:', error);
+    res.status(500).json({ error: 'Failed to process trade data' });
+  }
+});
+
+app.post('/cbot/stress', (req, res) => {
+  try {
+    const stressData = req.body;
+    console.log('Received stress event from cBot:', stressData.symbol, stressData.maxDrawdown);
+    
+    // Aggiungi evento stress
+    cbotData.stressEvents.push({ ...stressData, lastUpdate: new Date().toISOString() });
+    
+    // Mantieni solo gli ultimi 500 eventi stress
+    if (cbotData.stressEvents.length > 500) {
+      cbotData.stressEvents = cbotData.stressEvents.slice(-500);
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Stress event received and stored',
+      totalStressEvents: cbotData.stressEvents.length
+    });
+  } catch (error) {
+    console.error('Error processing stress data:', error);
+    res.status(500).json({ error: 'Failed to process stress data' });
+  }
+});
+
+// ✅ NUOVI ENDPOINT cBot - GET (per fornire dati al Google Apps Script)
+app.get('/cbot/positions', (req, res) => {
+  try {
+    const { symbol, label, limit = 100 } = req.query;
+    let filteredPositions = cbotData.positions;
+    
+    // Applica filtri
+    if (symbol) {
+      filteredPositions = filteredPositions.filter(p => 
+        p.symbol && p.symbol.toLowerCase().includes(symbol.toLowerCase())
+      );
+    }
+    
+    if (label) {
+      filteredPositions = filteredPositions.filter(p => 
+        p.label && p.label.includes(label)
+      );
+    }
+    
+    // Applica limit e ordina per timestamp
+    filteredPositions = filteredPositions
+      .sort((a, b) => new Date(b.lastUpdate || b.timestamp) - new Date(a.lastUpdate || a.timestamp))
+      .slice(0, parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: filteredPositions,
+      count: filteredPositions.length,
+      totalStored: cbotData.positions.length,
+      filters: { symbol, label, limit }
+    });
+  } catch (error) {
+    console.error('Error retrieving positions:', error);
+    res.status(500).json({ error: 'Failed to retrieve positions' });
+  }
+});
+
+app.get('/cbot/trades', (req, res) => {
+  try {
+    const { symbol, label, limit = 1000 } = req.query;
+    let filteredTrades = cbotData.trades;
+    
+    // Applica filtri
+    if (symbol) {
+      filteredTrades = filteredTrades.filter(t => 
+        t.symbol && t.symbol.toLowerCase().includes(symbol.toLowerCase())
+      );
+    }
+    
+    if (label) {
+      filteredTrades = filteredTrades.filter(t => 
+        t.label && t.label.includes(label)
+      );
+    }
+    
+    // Applica limit e ordina per exit time
+    filteredTrades = filteredTrades
+      .sort((a, b) => new Date(b.exitTime || b.lastUpdate) - new Date(a.exitTime || a.lastUpdate))
+      .slice(0, parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: filteredTrades,
+      count: filteredTrades.length,
+      totalStored: cbotData.trades.length,
+      filters: { symbol, label, limit }
+    });
+  } catch (error) {
+    console.error('Error retrieving trades:', error);
+    res.status(500).json({ error: 'Failed to retrieve trades' });
+  }
+});
+
+app.get('/cbot/stress', (req, res) => {
+  try {
+    const { symbol, label, limit = 100 } = req.query;
+    let filteredStress = cbotData.stressEvents;
+    
+    // Applica filtri
+    if (symbol) {
+      filteredStress = filteredStress.filter(s => 
+        s.symbol && s.symbol.toLowerCase().includes(symbol.toLowerCase())
+      );
+    }
+    
+    if (label) {
+      filteredStress = filteredStress.filter(s => 
+        s.label && s.label.includes(label)
+      );
+    }
+    
+    // Applica limit e ordina per start time
+    filteredStress = filteredStress
+      .sort((a, b) => new Date(b.startTime || b.lastUpdate) - new Date(a.startTime || a.lastUpdate))
+      .slice(0, parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: filteredStress,
+      count: filteredStress.length,
+      totalStored: cbotData.stressEvents.length,
+      filters: { symbol, label, limit }
+    });
+  } catch (error) {
+    console.error('Error retrieving stress events:', error);
+    res.status(500).json({ error: 'Failed to retrieve stress events' });
+  }
+});
+
+// Status endpoint (modificato per includere stats cBot)
 app.get('/status', async (req, res) => {
   try {
     const token = await getValidToken();
@@ -148,6 +349,13 @@ app.get('/status', async (req, res) => {
       tcpConnection: isConnected,
       authenticatedAccounts: Array.from(authAccounts.keys()),
       hybridSystem: hybridStats.getHybridStats(),
+      cbotDataStats: {
+        positions: cbotData.positions.length,
+        trades: cbotData.trades.length,
+        stressEvents: cbotData.stressEvents.length,
+        lastPositionUpdate: cbotData.positions.length > 0 ? 
+          cbotData.positions[cbotData.positions.length - 1].lastUpdate : null
+      },
       server: 'Render',
       timestamp: new Date().toISOString()
     });
@@ -157,9 +365,51 @@ app.get('/status', async (req, res) => {
       error: error.message,
       tcpConnection: isConnected,
       hybridSystem: hybridStats.getHybridStats(),
+      cbotDataStats: {
+        positions: cbotData.positions.length,
+        trades: cbotData.trades.length,
+        stressEvents: cbotData.stressEvents.length
+      },
       timestamp: new Date().toISOString()
     });
   }
+});
+
+// cBot status endpoint specifico
+app.get('/cbot/status', (req, res) => {
+  const now = new Date();
+  const recentPositions = cbotData.positions.filter(p => 
+    new Date(p.lastUpdate || p.timestamp) > new Date(now - 24 * 60 * 60 * 1000)
+  ).length;
+  
+  const recentTrades = cbotData.trades.filter(t => 
+    new Date(t.lastUpdate || t.exitTime) > new Date(now - 24 * 60 * 60 * 1000)
+  ).length;
+
+  res.json({
+    status: 'active',
+    dataReceived: {
+      totalPositions: cbotData.positions.length,
+      totalTrades: cbotData.trades.length,
+      totalStressEvents: cbotData.stressEvents.length,
+      recentPositions24h: recentPositions,
+      recentTrades24h: recentTrades
+    },
+    lastActivity: cbotData.positions.length > 0 ? 
+      Math.max(
+        ...cbotData.positions.map(p => new Date(p.lastUpdate || p.timestamp).getTime()),
+        ...cbotData.trades.map(t => new Date(t.lastUpdate || t.exitTime).getTime())
+      ) : null,
+    endpoints: {
+      'POST /cbot/positions': 'Receive position data from cBot',
+      'POST /cbot/trades': 'Receive trade data from cBot', 
+      'POST /cbot/stress': 'Receive stress events from cBot',
+      'GET /cbot/positions': 'Retrieve stored positions',
+      'GET /cbot/trades': 'Retrieve stored trades',
+      'GET /cbot/stress': 'Retrieve stored stress events'
+    },
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Get user profile
@@ -232,11 +482,20 @@ app.use((error, req, res, next) => {
   });
 });
 
-// 404 handler
+// 404 handler (aggiornato con i nuovi endpoint)
 app.use((req, res) => {
   res.status(404).json({
     error: 'Endpoint not found',
-    availableEndpoints: ['/accounts', '/profile', '/status', '/cbot/status', '/']
+    availableEndpoints: [
+      '/accounts', 
+      '/profile', 
+      '/status', 
+      '/cbot/status', 
+      '/cbot/positions', 
+      '/cbot/trades', 
+      '/cbot/stress',
+      '/'
+    ]
   });
 });
 
@@ -247,6 +506,7 @@ async function startServer() {
   app.listen(PORT, () => {
     console.log(`cTrader Bridge Server v2.1-hybrid running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log('✅ cBot endpoints active: /cbot/positions, /cbot/trades, /cbot/stress');
     
     if (!CLIENT_ID || !CLIENT_SECRET || !ACCESS_TOKEN) {
       console.warn('WARNING: Missing required environment variables!');
